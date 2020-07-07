@@ -33,6 +33,7 @@ plugins {
     id("gradlebuild.module-identity")
     id("gradlebuild.available-java-installations")
     id("org.gradle.test-retry")
+    id("com.gradle.enterprise.test-distribution")
 }
 
 extensions.create<UnitTestAndCompileExtension>("gradlebuildJava", java)
@@ -196,6 +197,8 @@ fun configureTests() {
         }
     }
     tasks.withType<Test>().configureEach {
+        outputs.cacheIf { false }
+
         maxParallelForks = project.maxParallelForks
 
         if (!BuildEnvironment.isIntelliJIDEA) {
@@ -207,10 +210,31 @@ fun configureTests() {
         configureJvmForTest()
         addOsAsInputs()
 
-        if (BuildEnvironment.isCiServer && this.javaClass.simpleName != "PerformanceTest") {
+        if (this.javaClass.simpleName != "PerformanceTest") {
             retry {
                 maxRetries.set(1)
                 maxFailures.set(10)
+            }
+            distribution {
+                maxLocalExecutors.set(0)
+                println(project.name)
+                val remoteExecutors = when (project.name) {
+                    "core" -> 10
+                    "plugins" -> 10
+                    "instantExecution" -> 10
+                    "samples" -> 10
+                    "languageJava" -> 10
+                    "dependencyManagement" -> 20
+                    "toolingApi" -> 10
+                    else -> 2
+                }
+                maxRemoteExecutors.set(remoteExecutors)
+                enabled.set(true)
+                when {
+                    OperatingSystem.current().isLinux -> requirements.set(listOf("os=linux"))
+                    OperatingSystem.current().isWindows -> requirements.set(listOf("os=windows"))
+                    OperatingSystem.current().isMacOsX -> requirements.set(listOf("os=macos"))
+                }
             }
             doFirst {
                 logger.lifecycle("maxParallelForks for '$path' is $maxParallelForks")
