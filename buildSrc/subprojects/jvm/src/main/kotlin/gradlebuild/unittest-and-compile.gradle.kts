@@ -220,17 +220,18 @@ fun configureTests() {
                 maxLocalExecutors.set(0)
                 if (testName == "test") {
                     maxRemoteExecutors.set(3)
-                } else if (project.name in listOf(
-                        "dependencyManagement",
-                        "kotlinDslToolingBuilders",
-                        "toolingApi",
-                        "launcher",
-                        "languageJava",
-                        "languageNative",
-                        "core",
-                        "samples",
-                        "plugins") && testName == "embeddedIntegTest") {
-                    maxRemoteExecutors.set(10)
+                } else if ("${project.name}:$testName".toString() in listOf(
+                        "dependencyManagement:embeddedIntegTest",
+                        "kotlinDslToolingBuilders:embeddedCrossVersionTest",
+                        "samples:embeddedIntegTest",
+                        "core:embeddedIntegTest",
+                        "languageJava:embeddedIntegTest",
+                        "launcher:embeddedIntegTest",
+                        "toolingApi:embeddedCrossVersionTest",
+                        "plugins:embeddedIntegTest",
+                        "pluginUse:embeddedIntegTest")) {
+                    println("${project.name}:${testName}:20")
+                    maxRemoteExecutors.set(20)
                 } else {
                     maxRemoteExecutors.set(System.getProperty("max.remote.executors")?.toInt() ?: 3)
                 }
