@@ -210,6 +210,7 @@ fun configureTests() {
         configureJvmForTest()
         addOsAsInputs()
 
+        val testName = name
         if (this.javaClass.simpleName != "PerformanceTest") {
             retry {
                 maxRetries.set(1)
@@ -217,6 +218,21 @@ fun configureTests() {
             }
             distribution {
                 maxLocalExecutors.set(0)
+                if (testName == "test") {
+                    maxRemoteExecutors.set(3)
+                } else if (project.name in listOf(
+                        "dependencyManagement",
+                        "kotlinDslToolingBuilders",
+                        "toolingApi",
+                        "launcher",
+                        "languageJava",
+                        "core",
+                        "samples",
+                        "plugins")) {
+                    maxRemoteExecutors.set(20)
+                } else {
+                    maxRemoteExecutors.set(System.getProperty("max.remote.executors")?.toInt() ?: 5)
+                }
 //                val remoteExecutors = when (project.name) {
 //                    "core" -> 10
 //                    "plugins" -> 10
@@ -227,7 +243,6 @@ fun configureTests() {
 //                    "toolingApi" -> 10
 //                    else -> 2
 //                }
-                maxRemoteExecutors.set(System.getProperty("max.remote.executors")?.toInt() ?: 10)
                 enabled.set(true)
                 when {
                     OperatingSystem.current().isLinux -> requirements.set(listOf("os=linux"))
