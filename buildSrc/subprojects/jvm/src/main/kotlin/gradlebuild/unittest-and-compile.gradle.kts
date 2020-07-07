@@ -217,18 +217,17 @@ fun configureTests() {
             }
             distribution {
                 maxLocalExecutors.set(0)
-                println(project.name)
-                val remoteExecutors = when (project.name) {
-                    "core" -> 10
-                    "plugins" -> 10
-                    "instantExecution" -> 10
-                    "samples" -> 10
-                    "languageJava" -> 10
-                    "dependencyManagement" -> 20
-                    "toolingApi" -> 10
-                    else -> 2
-                }
-                maxRemoteExecutors.set(remoteExecutors)
+//                val remoteExecutors = when (project.name) {
+//                    "core" -> 10
+//                    "plugins" -> 10
+//                    "instantExecution" -> 10
+//                    "samples" -> 10
+//                    "languageJava" -> 10
+//                    "dependencyManagement" -> 20
+//                    "toolingApi" -> 10
+//                    else -> 2
+//                }
+                maxRemoteExecutors.set(10)
                 enabled.set(true)
                 when {
                     OperatingSystem.current().isLinux -> requirements.set(listOf("os=linux"))
