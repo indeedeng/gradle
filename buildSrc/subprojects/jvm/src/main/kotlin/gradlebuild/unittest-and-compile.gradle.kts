@@ -227,7 +227,7 @@ fun configureTests() {
 //                    "toolingApi" -> 10
 //                    else -> 2
 //                }
-                maxRemoteExecutors.set(10)
+                maxRemoteExecutors.set(System.getProperty("max.remote.executors")?.toInt() ?: 10)
                 enabled.set(true)
                 when {
                     OperatingSystem.current().isLinux -> requirements.set(listOf("os=linux"))
