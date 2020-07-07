@@ -226,23 +226,14 @@ fun configureTests() {
                         "toolingApi",
                         "launcher",
                         "languageJava",
+                        "languageNative",
                         "core",
                         "samples",
-                        "plugins")) {
-                    maxRemoteExecutors.set(20)
+                        "plugins") && testName == "embeddedIntegTest") {
+                    maxRemoteExecutors.set(10)
                 } else {
-                    maxRemoteExecutors.set(System.getProperty("max.remote.executors")?.toInt() ?: 5)
+                    maxRemoteExecutors.set(System.getProperty("max.remote.executors")?.toInt() ?: 3)
                 }
-//                val remoteExecutors = when (project.name) {
-//                    "core" -> 10
-//                    "plugins" -> 10
-//                    "instantExecution" -> 10
-//                    "samples" -> 10
-//                    "languageJava" -> 10
-//                    "dependencyManagement" -> 20
-//                    "toolingApi" -> 10
-//                    else -> 2
-//                }
                 enabled.set(true)
                 when {
                     OperatingSystem.current().isLinux -> requirements.set(listOf("os=linux"))

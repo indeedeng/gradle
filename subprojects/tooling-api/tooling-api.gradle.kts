@@ -96,3 +96,7 @@ testFilesCleanup {
     policy.set(WhenNotEmpty.REPORT)
 }
 integrationTestUsesSampleDir("subprojects/tooling-api/src/main")
+
+tasks.named("embeddedCrossVersionTest") {
+    mustRunAfter("embeddedIntegTest")
+}
