@@ -29,11 +29,13 @@ import org.gradle.api.initialization.ConfigurableIncludedBuild;
 import org.gradle.api.internal.BuildDefinition;
 import org.gradle.api.internal.GradleInternal;
 import org.gradle.api.internal.SettingsInternal;
+import org.gradle.api.internal.artifacts.DefaultModuleVersionIdentifier;
 import org.gradle.api.internal.artifacts.DefaultProjectComponentIdentifier;
 import org.gradle.api.internal.artifacts.ForeignBuildIdentifier;
 import org.gradle.api.internal.artifacts.ivyservice.projectmodule.LocalComponentRegistry;
 import org.gradle.api.internal.project.ProjectInternal;
 import org.gradle.api.invocation.Gradle;
+import org.gradle.api.plugins.ExtraPropertiesExtension;
 import org.gradle.api.tasks.TaskReference;
 import org.gradle.initialization.GradleLauncher;
 import org.gradle.initialization.IncludedBuildSpec;
@@ -191,6 +193,18 @@ public class DefaultIncludedBuild extends AbstractBuildState implements Included
         ProjectComponentIdentifier projectIdentifier = new DefaultProjectComponentIdentifier(buildIdentifier, project.getIdentityPath(), project.getProjectPath(), project.getName());
         DefaultLocalComponentMetadata originalComponent = (DefaultLocalComponentMetadata) localComponentRegistry.getComponent(projectIdentifier);
         ModuleVersionIdentifier moduleId = originalComponent.getModuleVersionId();
+
+        // BEGIN_INDEED GRADLE-448
+        final ExtraPropertiesExtension ext = project.getExtensions().getByType(ExtraPropertiesExtension.class);
+        try {
+            final String group = (String) ext.get("indeed.composite.build.group");
+            final String name = (String) ext.get("indeed.composite.build.name");
+            if (group != null && name != null) {
+                moduleId = DefaultModuleVersionIdentifier.newId(group, name, "composite");
+            }
+        } catch(ExtraPropertiesExtension.UnknownPropertyException e) {}
+        // END_INDEED
+
         LOGGER.info("Registering " + project + " in composite build. Will substitute for module '" + moduleId.getModule() + "'.");
         availableModules.add(Pair.of(moduleId, projectIdentifier));
     }

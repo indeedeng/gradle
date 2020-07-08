@@ -161,8 +161,17 @@ public class VersionRangeSelector extends AbstractVersionVersionSelector {
 
     @Override
     public boolean matchesUniqueVersion() {
+        // BEGIN_INDEED GRADLE-442
+        return true;
+        // END_INDEED
+    }
+
+    // BEGIN_INDEED GRADLE-442
+    @Override
+    public boolean canShortCircuitWhenVersionAlreadyPreselected() {
         return false;
     }
+    // END_INDEED
 
     @Override
     public boolean accept(Version candidate) {

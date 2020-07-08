@@ -42,7 +42,9 @@ public class SubVersionSelector extends AbstractStringVersionSelector {
 
     @Override
     public boolean matchesUniqueVersion() {
-        return false;
+        // BEGIN_INDEED GRADLE-442
+        return true;
+        // END_INDEED
     }
 
     @Override

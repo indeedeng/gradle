@@ -90,7 +90,9 @@ public class ResolvedArtifactsGraphVisitor implements DependencyGraphVisitor {
         List<? extends ComponentArtifactMetadata> artifacts = dependency.getArtifacts(targetConfiguration);
         if (!artifacts.isEmpty()) {
             int id = nextId++;
+
             ArtifactSet artifactSet = artifactSelector.resolveArtifacts(component, artifacts, overriddenAttributes);
+
             return new ArtifactsForNode(id, artifactSet);
         }
 

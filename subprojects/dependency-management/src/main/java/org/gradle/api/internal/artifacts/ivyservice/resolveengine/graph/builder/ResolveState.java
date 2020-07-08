@@ -24,6 +24,7 @@ import org.gradle.api.artifacts.component.ComponentIdentifier;
 import org.gradle.api.artifacts.component.ComponentSelector;
 import org.gradle.api.artifacts.component.ModuleComponentSelector;
 import org.gradle.api.internal.artifacts.ComponentSelectorConverter;
+import org.gradle.api.internal.artifacts.DefaultModuleIdentifier;
 import org.gradle.api.internal.artifacts.ResolvedConfigurationIdentifier;
 import org.gradle.api.internal.artifacts.ResolvedVersionConstraint;
 import org.gradle.api.internal.artifacts.dependencies.DefaultResolvedVersionConstraint;
@@ -40,6 +41,7 @@ import org.gradle.api.internal.attributes.AttributesSchemaInternal;
 import org.gradle.api.internal.attributes.ImmutableAttributes;
 import org.gradle.api.internal.attributes.ImmutableAttributesFactory;
 import org.gradle.api.specs.Spec;
+import org.gradle.internal.component.external.model.DefaultModuleComponentSelector;
 import org.gradle.internal.component.model.ComponentResolveMetadata;
 import org.gradle.internal.component.model.ConfigurationMetadata;
 import org.gradle.internal.component.model.DependencyMetadata;
@@ -162,7 +164,19 @@ class ResolveState implements ComponentStateFactory<ComponentState> {
     }
 
     public SelectorState getSelector(DependencyState dependencyState) {
-        SelectorState selectorState = selectors.computeIfAbsent(dependencyState.getRequested(), req -> {
+        // BEGIN_INDEED GRADLE-64
+        /* INDEED -- Must cache based on both requested AND selected id, since the selected id may change during
+           the resolve process in indeed gradle (due to overrides and excludes).
+         */
+        ComponentSelector actualRequested = dependencyState.getRequested();
+        ComponentSelector actualSelected = dependencyState.getDependency().getSelector();
+        ComponentSelector requested = DefaultModuleComponentSelector.newSelector(
+                DefaultModuleIdentifier.newId("a", "a"),
+                actualRequested.toString()+"~"+actualSelected.toString()
+        );
+
+        SelectorState selectorState = selectors.computeIfAbsent(requested, req -> {
+        // END_INDEED
             ModuleIdentifier moduleIdentifier = dependencyState.getModuleIdentifier();
             return new SelectorState(idGenerator.generateId(), dependencyState, idResolver, this, moduleIdentifier);
         });

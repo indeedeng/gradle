@@ -117,9 +117,13 @@ public class DefaultCachePolicy implements CachePolicy {
         eachDependency(new Action<DependencyResolutionControl>() {
             @Override
             public void execute(DependencyResolutionControl dependencyResolutionControl) {
-                if (!dependencyResolutionControl.getCachedResult().isEmpty()) {
-                    dependencyResolutionControl.cacheFor(value, unit);
-                }
+                // BEGIN_INDEED GRADLE-447
+                // INDEED -- Always apply cacheDynamicVersionsFor, even if the results are empty.
+                // If this "if" is here, it cacnes an empty version list FOREVER, which means
+                // that it won't look in a repository for dyanmic versions if they were ever
+                // empty in the past. This prevents our projects from easily converting from ivy to maven.
+                dependencyResolutionControl.cacheFor(value, unit);
+                // END_INDEED
             }
         });
     }

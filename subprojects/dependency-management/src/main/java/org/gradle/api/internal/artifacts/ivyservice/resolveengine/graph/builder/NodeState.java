@@ -25,23 +25,29 @@ import com.google.common.collect.Sets;
 import org.gradle.api.Action;
 import org.gradle.api.artifacts.ModuleIdentifier;
 import org.gradle.api.artifacts.component.ComponentIdentifier;
+import org.gradle.api.artifacts.component.ComponentSelector;
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier;
 import org.gradle.api.artifacts.component.ModuleComponentSelector;
 import org.gradle.api.artifacts.result.ResolvedVariantResult;
 import org.gradle.api.attributes.AttributeContainer;
 import org.gradle.api.capabilities.Capability;
-import org.gradle.api.internal.artifacts.DependencySubstitutionInternal;
+import org.gradle.api.internal.artifacts.DefaultModuleIdentifier;
 import org.gradle.api.internal.artifacts.ResolvedConfigurationIdentifier;
-import org.gradle.api.internal.artifacts.ivyservice.dependencysubstitution.DependencySubstitutionApplicator;
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.excludes.ModuleExclusions;
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.excludes.specs.ExcludeSpec;
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.graph.DependencyGraphNode;
 import org.gradle.api.internal.artifacts.result.DefaultResolvedVariantResult;
 import org.gradle.api.internal.attributes.ImmutableAttributes;
 import org.gradle.api.internal.attributes.ImmutableAttributesFactory;
+import org.gradle.api.internal.indeed.IndeedResolverCore;
+import org.gradle.api.internal.indeed.IndeedRuleRewriter;
+import org.gradle.api.internal.indeed.MergedOverrideRules;
+import org.gradle.api.internal.indeed.OverrideRuleSerializer;
+import org.gradle.api.internal.indeed.SingleOverrideRule;
 import org.gradle.internal.Describables;
 import org.gradle.internal.DisplayName;
 import org.gradle.internal.component.external.model.DefaultModuleComponentSelector;
+import org.gradle.internal.component.external.model.GradleDependencyMetadata;
 import org.gradle.internal.component.external.model.ShadowedCapability;
 import org.gradle.internal.component.local.model.LocalConfigurationMetadata;
 import org.gradle.internal.component.local.model.LocalFileDependencyMetadata;
@@ -56,6 +62,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -79,8 +86,6 @@ public class NodeState implements DependencyGraphNode {
     private final boolean dependenciesMayChange;
     private boolean doesNotHaveDependencies;
 
-    ExcludeSpec previousTraversalExclusions;
-
     // In opposite to outgoing edges, virtual edges are for now pretty rare, so they are created lazily
     private List<EdgeState> virtualEdges;
     private boolean queued;
@@ -95,20 +100,18 @@ public class NodeState implements DependencyGraphNode {
     private Map<DependencyMetadata, DependencyState> dependencyStateCache = Maps.newHashMap();
     private Map<DependencyState, EdgeState> edgesCache = Maps.newHashMap();
 
-    // Caches the list of dependency states for dependencies
-    private List<DependencyState> cachedDependencyStates;
-
-    // Caches the list of dependency states which are NOT excluded
-    private List<DependencyState> cachedFilteredDependencyStates;
-
     // exclusions optimizations
-    private ExcludeSpec cachedNodeExclusions;
     private int previousIncomingEdgeCount;
     private long previousIncomingHash;
     private long incomingHash;
     private ExcludeSpec cachedModuleResolutionFilter;
     private ResolvedVariantResult cachedVariantResult;
 
+
+    // BEGIN_INDEED GRADLE-432
+    private List<SingleOverrideRule> localOverrideRules;
+    MergedOverrideRules previousMergedOverrideRules;
+    // END_INDEED
 
     public NodeState(Long resultId, ResolvedConfigurationIdentifier id, ComponentState component, ResolveState resolveState, ConfigurationMetadata md) {
         this.resultId = resultId;
@@ -121,6 +124,17 @@ public class NodeState implements DependencyGraphNode {
         this.moduleExclusions = resolveState == null ? null : resolveState.getModuleExclusions(); // can be null in tests, ResolveState cannot be mocked
         this.dependenciesMayChange = component.getModule() != null && component.getModule().isVirtualPlatform(); // can be null in tests, ComponentState cannot be mocked
         component.addConfiguration(this);
+
+        // BEGIN_INDEED GRADLE-432
+        /*
+        Generate the list of overrides defined in the metadata for this module.
+        This includes force="true", <override>, <conflict>, and <exclude> tags.
+        */
+        localOverrideRules = IndeedRuleRewriter.rewriteOverrides(
+                resolveState.getDependencySubstitutionApplicator(),
+                OverrideRuleSerializer.parseFromNode(component.getMetadata(), metaData)
+        );
+        // END_INDEED
     }
 
     // the enqueue and dequeue methods are used for performance reasons
@@ -247,12 +261,17 @@ public class NodeState implements DependencyGraphNode {
         }
 
         // Determine the net exclusion for this node, by inspecting all transitive incoming edges
-        ExcludeSpec resolutionFilter = computeModuleResolutionFilter(incomingEdges);
+        // BEGIN_INDEED GRADLE-432
+        final ExcludeSpec resolutionFilter = moduleExclusions.nothing();
+        final MergedOverrideRules mergedOverrideRules = getMergedOverrideRules(incomingEdges);
+        // END_INDEED
 
         // Virtual platforms require their constraints to be recomputed each time as each module addition can cause a shift in versions
         if (!isVirtualPlatformNeedsRefresh()) {
             // Check if node was previously traversed with the same net exclusion when not a virtual platform
-            if (excludesSameDependenciesAsPreviousTraversal(resolutionFilter)) {
+            // BEGIN_INDEED GRADLE-432
+            if (previousMergedOverrideRules != null && previousMergedOverrideRules.equals(mergedOverrideRules)) {
+            // END_INDEED
                 boolean newConstraints = handleNewConstraints(discoveredEdges);
                 boolean edgesToRecompute = handleEdgesToRecompute(discoveredEdges);
                 if (!newConstraints && !edgesToRecompute) {
@@ -260,50 +279,28 @@ public class NodeState implements DependencyGraphNode {
                     // Don't need to traverse again, but hang on to the new filter since it may change the set of excluded artifacts.
                     LOGGER.debug("Changed edges for {} selects same versions as previous traversal. ignoring", this);
                 }
-                previousTraversalExclusions = resolutionFilter;
+                // BEGIN_INDEED GRADLE-432
+                previousMergedOverrideRules = mergedOverrideRules;
+                // END_INDEED
                 return;
             }
         }
 
         // Clear previous traversal state, if any
-        if (previousTraversalExclusions != null) {
+        // BEGIN_INDEED GRADLE-432
+        if (previousMergedOverrideRules != null) {
+        // END_INDEED
             removeOutgoingEdges();
             upcomingNoLongerPendingConstraints = null;
             edgesToRecompute = null;
             potentiallyActivatedConstraints = null;
         }
 
-        visitDependencies(resolutionFilter, discoveredEdges);
-        visitOwners(discoveredEdges);
-    }
+        // BEGIN_INDEED GRADLE-432
+        visitDependencies(resolutionFilter, discoveredEdges, mergedOverrideRules);
+        // END_INDEED
 
-    private boolean excludesSameDependenciesAsPreviousTraversal(ExcludeSpec newResolutionFilter) {
-        List<DependencyState> oldStates = cachedFilteredDependencyStates;
-        if (previousTraversalExclusions == null || oldStates == null) {
-            return false;
-        }
-        if (previousTraversalExclusions.equals(newResolutionFilter)) {
-            return true;
-        }
-        if (doesNotHaveDependencies && !dependenciesMayChange) {
-            // whatever the exclude filter, there are no dependencies
-            return true;
-        }
-        cachedFilteredDependencyStates = null;
-        // here, we need to check that applying the new resolution filter
-        // we would actually exclude exactly the same dependencies as in
-        // the previous visit. It is important that this is NOT a heuristic
-        // (it used to be) because if the filters are _equivalent_, we would
-        // revisit all dependencies and possibly change the classpath order!
-        boolean sameDependencies = dependencies(newResolutionFilter).equals(oldStates);
-        if (LOGGER.isDebugEnabled()) {
-            if (sameDependencies) {
-                LOGGER.debug("Filter {} excludes same dependencies as previous {}. Dependencies left = {}", newResolutionFilter, previousTraversalExclusions, oldStates);
-            } else {
-                LOGGER.debug("Filter {} doesn't exclude same dependencies as previous {}. Previous dependencies left = {} - New dependencies left = {}", newResolutionFilter, previousTraversalExclusions, oldStates, cachedFilteredDependencyStates);
-            }
-        }
-        return sameDependencies;
+        visitOwners(discoveredEdges);
     }
 
     private void prepareToRecomputeEdge(EdgeState edgeToRecompute) {
@@ -344,7 +341,9 @@ public class NodeState implements DependencyGraphNode {
      */
     private void handleNonTransitiveNode(Collection<EdgeState> discoveredEdges) {
         // If node was previously traversed, need to remove outgoing edges.
-        if (previousTraversalExclusions != null) {
+        // BEGIN_INDEED GRADLE-432
+        if (previousMergedOverrideRules != null) {
+        // END_INDEED
             removeOutgoingEdges();
         }
         if (!incomingEdges.isEmpty()) {
@@ -363,20 +362,32 @@ public class NodeState implements DependencyGraphNode {
      * Iterate over the dependencies originating in this node, adding them either as a 'pending' dependency
      * or adding them to the `discoveredEdges` collection (and `this.outgoingEdges`)
      */
-    private void visitDependencies(ExcludeSpec resolutionFilter, Collection<EdgeState> discoveredEdges) {
+    // BEGIN_INDEED GRADLE-432
+    private void visitDependencies(ExcludeSpec resolutionFilter, Collection<EdgeState> discoveredEdges, MergedOverrideRules mergedOverrideRules) {
+    // END_INDEED
         PendingDependenciesVisitor pendingDepsVisitor = resolveState.newPendingDependenciesVisitor();
         try {
-            for (DependencyState dependencyState : dependencies(resolutionFilter)) {
-                dependencyState = maybeSubstitute(dependencyState, resolveState.getDependencySubstitutionApplicator());
-                PendingDependenciesVisitor.PendingState pendingState = pendingDepsVisitor.maybeAddAsPendingDependency(this, dependencyState);
-                if (dependencyState.getDependency().isConstraint()) {
-                    registerActivatingConstraint(dependencyState);
+            // BEGIN_INDEED GRADLE-432
+            final IndeedResolverCore indeedResolverCore = new IndeedResolverCore(
+                    mergedOverrideRules,
+                    resolveState.getDependencySubstitutionApplicator()
+            );
+            for (DependencyMetadata dependency : metaData.getDependencies()) {
+                if (!resolveState.getEdgeFilter().isSatisfiedBy(dependency)) {
+                    continue;
                 }
-                if (!pendingState.isPending()) {
-                    createAndLinkEdgeState(dependencyState, discoveredEdges, resolutionFilter, pendingState == PendingDependenciesVisitor.PendingState.NOT_PENDING_ACTIVATING);
+                for (final DependencyState dependencyState : createDependencyStates(dependency, indeedResolverCore)) {
+                    PendingDependenciesVisitor.PendingState pendingState = pendingDepsVisitor.maybeAddAsPendingDependency(this, dependencyState);
+                    if (dependencyState.getDependency().isConstraint()) {
+                        registerActivatingConstraint(dependencyState);
+                    }
+                    if (!pendingState.isPending()) {
+                        createAndLinkEdgeState(dependencyState, discoveredEdges, mergedOverrideRules, pendingState == PendingDependenciesVisitor.PendingState.NOT_PENDING_ACTIVATING);
+                    }
                 }
             }
-            previousTraversalExclusions = resolutionFilter;
+            previousMergedOverrideRules = mergedOverrideRules;
+            // END_INDEED
         } finally {
             // If there are 'pending' dependencies that share a target with any of these outgoing edges,
             // then reset the state of the node that owns those dependencies.
@@ -392,57 +403,55 @@ public class NodeState implements DependencyGraphNode {
         potentiallyActivatedConstraints.put(dependencyState.getModuleIdentifier(), dependencyState);
     }
 
-    private List<? extends DependencyMetadata> dependencies() {
-        if (dependenciesMayChange) {
-            cachedDependencyStates = null;
-            cachedFilteredDependencyStates = null;
-        }
-        List<? extends DependencyMetadata> dependencies = metaData.getDependencies();
-        doesNotHaveDependencies = dependencies.isEmpty();
-        return dependencies;
-    }
+    // BEGIN_INDEED GRADLE-432
+    private List<DependencyState> createDependencyStates(
+            final DependencyMetadata dependency,
+            final IndeedResolverCore indeedResolverCore
+    ) {
+        final DependencyState baseState = createDependencyState(dependency);
+        try {
+            final ComponentSelector selector = dependency.getSelector();
+            final ImmutableList.Builder<DependencyState> states = ImmutableList.builder();
 
-    private List<DependencyState> dependencies(ExcludeSpec spec) {
-        List<? extends DependencyMetadata> dependencies = dependencies();
-        if (cachedDependencyStates == null) {
-            cachedDependencyStates = cacheDependencyStates(dependencies);
-        }
-        if (cachedFilteredDependencyStates == null) {
-            cachedFilteredDependencyStates = cacheFilteredDependencyStates(spec, cachedDependencyStates);
-        }
-        return cachedFilteredDependencyStates;
-    }
-
-    private List<DependencyState> cacheFilteredDependencyStates(ExcludeSpec spec, List<DependencyState> from) {
-        if (from.isEmpty()) {
-            return from;
-        }
-        List<DependencyState> tmp = Lists.newArrayListWithCapacity(from.size());
-        for (DependencyState dependencyState : from) {
-            if (!isExcluded(spec, dependencyState)) {
-                tmp.add(dependencyState);
+            final List<IndeedResolverCore.Result> rewritten = indeedResolverCore.rewrite(selector);
+            for (final IndeedResolverCore.Result result : rewritten) {
+                if (rewritten.size() == 1) {
+                    if (selector.equals(result.selector) && result.reasons.isEmpty()) {
+                        states.add(baseState);
+                    } else {
+                        states.add(baseState.withTarget(result.selector, result.reasons));
+                    }
+                } else {
+                    final ModuleComponentSelector freshSelector = DefaultModuleComponentSelector.newSelector(
+                            DefaultModuleIdentifier.newId(
+                                "indeed-combo",
+                                selector.getDisplayName()+"-"+result.selector.getDisplayName()
+                            ),
+                            "indeed-combo"
+                    );
+                    final GradleDependencyMetadata freshMetadata = new GradleDependencyMetadata(
+                            freshSelector,
+                            dependency.getExcludes(),
+                            dependency.isConstraint(),
+                            dependency.getReason(),
+                            false
+                    );
+                    final DependencyState state = createDependencyState(freshMetadata);
+                    states.add(state.withTarget(result.selector, result.reasons));
+                }
             }
+            return states.build();
+        } catch(Throwable e) {
+            baseState.failure = new ModuleVersionResolveException(baseState.getRequested(), e);
+            return ImmutableList.of(baseState);
         }
-        return tmp;
     }
+    // END_INDEED
 
-    private List<DependencyState> cacheDependencyStates(List<? extends DependencyMetadata> dependencies) {
-        if (dependencies.isEmpty()) {
-            return Collections.emptyList();
-        }
-        List<DependencyState> tmp = Lists.newArrayListWithCapacity(dependencies.size());
-        for (DependencyMetadata dependency : dependencies) {
-            tmp.add(cachedDependencyStateFor(dependency));
-        }
-        return tmp;
-    }
-
-    private DependencyState cachedDependencyStateFor(DependencyMetadata md) {
-        return dependencyStateCache.computeIfAbsent(md, this::createDependencyState);
-    }
-
-    private void createAndLinkEdgeState(DependencyState dependencyState, Collection<EdgeState> discoveredEdges, ExcludeSpec resolutionFilter, boolean deferSelection) {
-        EdgeState dependencyEdge = edgesCache.computeIfAbsent(dependencyState, ds -> new EdgeState(this, ds, resolutionFilter, resolveState));
+    // BEGIN_INDEED GRADLE-432
+    private void createAndLinkEdgeState(DependencyState dependencyState, Collection<EdgeState> discoveredEdges, MergedOverrideRules mergedOverrideRules, boolean deferSelection) {
+        EdgeState dependencyEdge = new EdgeState(this, dependencyState, mergedOverrideRules, resolveState);
+    // END_INDEED
         dependencyEdge.getSelector().update(dependencyState);
         outgoingEdges.add(dependencyEdge);
         discoveredEdges.add(dependencyEdge);
@@ -461,13 +470,38 @@ public class NodeState implements DependencyGraphNode {
             Collection<DependencyState> dependencyStates = potentiallyActivatedConstraints.get(module);
             if (!dependencyStates.isEmpty()) {
                 for (DependencyState dependencyState : dependencyStates) {
-                    dependencyState = maybeSubstitute(dependencyState, resolveState.getDependencySubstitutionApplicator());
-                    createAndLinkEdgeState(dependencyState, discoveredEdges, previousTraversalExclusions, false);
+                    // BEGIN_INDEED GRADLE-432
+                    createAndLinkEdgeState(dependencyState, discoveredEdges, previousMergedOverrideRules, false);
+                    // END_INDEED
                 }
             }
         }
         upcomingNoLongerPendingConstraints = null;
     }
+
+    // BEGIN_INDEED GRADLE-432
+    /* Calculate the override rules which apply to this module */
+    private MergedOverrideRules getMergedOverrideRules(
+            final List<EdgeState> transitiveEdges
+    ) {
+        // Filter out parents that originate from 'platform' edges, as they are dependency loops which should be allowed.
+        // For instance, when using version alignment, we may wind up with a dependency branch that looks like this and should be allowed:
+        // org.springframework:spring-beans:4.0.0 -> org.springframework:platform:4.1.0 -> org.springframework:spring-beans:4.1.0
+        final Set<MergedOverrideRules> parentOverrideRules = new HashSet<>();
+        for (final EdgeState edge : transitiveEdges) {
+            if (edge.getDependencyMetadata() instanceof LenientPlatformDependencyMetadata) {
+                continue;
+            }
+            parentOverrideRules.add(edge.getMergedOverrideRules());
+        }
+
+        return MergedOverrideRules.create(
+                parentOverrideRules,
+                localOverrideRules,
+                this
+        );
+    }
+    // END_INDEED
 
     /**
      * If a component declares that it belongs to a platform, we add an edge to the platform.
@@ -519,49 +553,11 @@ public class NodeState implements DependencyGraphNode {
         edge.getSelector().use(false);
     }
 
-
-    /**
-     * Execute any dependency substitution rules that apply to this dependency.
-     *
-     * This may be better done as a decorator on ConfigurationMetadata.getDependencies()
-     */
-    static DependencyState maybeSubstitute(DependencyState dependencyState, DependencySubstitutionApplicator dependencySubstitutionApplicator) {
-        DependencySubstitutionApplicator.SubstitutionResult substitutionResult = dependencySubstitutionApplicator.apply(dependencyState.getDependency());
-        if (substitutionResult.hasFailure()) {
-            dependencyState.failure = new ModuleVersionResolveException(dependencyState.getRequested(), substitutionResult.getFailure());
-            return dependencyState;
-        }
-
-        DependencySubstitutionInternal details = substitutionResult.getResult();
-        if (details != null && details.isUpdated()) {
-            return dependencyState.withTarget(details.getTarget(), details.getRuleDescriptors());
-        }
-        return dependencyState;
-    }
-
     private boolean hasAnyTransitiveEdge() {
         if (isRoot()) {
             return true;
         }
         return incomingEdges.stream().anyMatch(EdgeState::isTransitive);
-    }
-
-    private boolean isExcluded(ExcludeSpec excludeSpec, DependencyState dependencyState) {
-        DependencyMetadata dependency = dependencyState.getDependency();
-        if (!resolveState.getEdgeFilter().isSatisfiedBy(dependency)) {
-            LOGGER.debug("{} is filtered.", dependency);
-            return true;
-        }
-        if (excludeSpec == moduleExclusions.nothing()) {
-            return false;
-        }
-        ModuleIdentifier targetModuleId = dependencyState.getModuleIdentifier();
-        if (excludeSpec.excludes(targetModuleId)) {
-            LOGGER.debug("{} is excluded from {} by {}.", targetModuleId, this, excludeSpec);
-            return true;
-        }
-
-        return false;
     }
 
     void addIncomingEdge(EdgeState dependencyEdge) {
@@ -599,137 +595,8 @@ public class NodeState implements DependencyGraphNode {
         return isSelected() && !component.getModule().isVirtualPlatform();
     }
 
-    private ExcludeSpec computeModuleResolutionFilter(List<EdgeState> incomingEdges) {
-        ExcludeSpec nodeExclusions = computeNodeExclusions();
-        if (incomingEdges.isEmpty()) {
-            return nodeExclusions;
-        }
-
-        return computeExclusionFilter(incomingEdges, nodeExclusions);
-    }
-
-    private ExcludeSpec computeNodeExclusions() {
-        if (cachedNodeExclusions == null) {
-            cachedNodeExclusions = moduleExclusions.excludeAny(metaData.getExcludes());
-        }
-        return cachedNodeExclusions;
-    }
-
-    private ExcludeSpec computeExclusionFilter(List<EdgeState> incomingEdges, ExcludeSpec nodeExclusions) {
-        int incomingEdgeCount = incomingEdges.size();
-        if (sameIncomingEdgesAsPreviousPass(incomingEdgeCount)) {
-            // if we reach this point it means the node selection was restarted, but
-            // effectively it has the same incoming edges as before, so we can return
-            // the result we computed last time
-            return cachedModuleResolutionFilter;
-        }
-        if (incomingEdgeCount == 1) {
-            return computeExclusionFilterSingleIncomingEdge(incomingEdges.get(0), nodeExclusions);
-        }
-        return computeModuleExclusionsManyEdges(incomingEdges, nodeExclusions, incomingEdgeCount);
-    }
-
-    private ExcludeSpec computeModuleExclusionsManyEdges(List<EdgeState> incomingEdges, ExcludeSpec nodeExclusions, int incomingEdgeCount) {
-        ExcludeSpec nothing = moduleExclusions.nothing();
-        ExcludeSpec edgeExclusions = null;
-        Set<ExcludeSpec> excludedByBoth = null;
-        Set<ExcludeSpec> excludedByEither = null;
-        for (EdgeState dependencyEdge : incomingEdges) {
-            if (dependencyEdge.isTransitive()) {
-                if (edgeExclusions != nothing) {
-                    // Transitive dependency
-                    ExcludeSpec exclusions = dependencyEdge.getExclusions();
-                    if (edgeExclusions == null || exclusions == nothing) {
-                        edgeExclusions = exclusions;
-                    } else if (exclusions != null && edgeExclusions != exclusions) {
-                        if (excludedByBoth == null) {
-                            excludedByBoth = Sets.newHashSetWithExpectedSize(incomingEdgeCount);
-                        }
-                        excludedByBoth.add(exclusions);
-                    }
-                    if (edgeExclusions == nothing) {
-                        // if exclusions == nothing, then the intersection will be "nothing"
-                        excludedByBoth = null;
-                    }
-                }
-            } else if (isConstraint(dependencyEdge)) {
-                excludedByEither = collectEdgeConstraint(nodeExclusions, excludedByEither, dependencyEdge, nothing, incomingEdgeCount);
-            }
-        }
-        edgeExclusions = intersectEdgeExclusions(edgeExclusions, excludedByBoth);
-        nodeExclusions = joinNodeExclusions(nodeExclusions, excludedByEither);
-        return joinEdgeAndNodeExclusionsThenCacheResult(nodeExclusions, edgeExclusions, incomingEdgeCount);
-    }
-
-    private ExcludeSpec computeExclusionFilterSingleIncomingEdge(EdgeState dependencyEdge, ExcludeSpec nodeExclusions) {
-        ExcludeSpec exclusions = null;
-        if (dependencyEdge.isTransitive()) {
-            exclusions = dependencyEdge.getExclusions();
-        } else if (isConstraint(dependencyEdge)) {
-            exclusions = dependencyEdge.getEdgeExclusions();
-        }
-        if (exclusions == null) {
-            exclusions = moduleExclusions.nothing();
-        }
-        return joinEdgeAndNodeExclusionsThenCacheResult(nodeExclusions, exclusions, 1);
-    }
-
     private static boolean isConstraint(EdgeState dependencyEdge) {
         return dependencyEdge.getDependencyMetadata().isConstraint();
-    }
-
-    private ExcludeSpec joinEdgeAndNodeExclusionsThenCacheResult(ExcludeSpec nodeExclusions, ExcludeSpec edgeExclusions, int incomingEdgeCount) {
-        ExcludeSpec result = moduleExclusions.excludeAny(edgeExclusions, nodeExclusions);
-        // We use a set here because for excludes, order of edges is irrelevant
-        // so we hit the cache more by using a set
-        previousIncomingEdgeCount = incomingEdgeCount;
-        previousIncomingHash = incomingHash;
-        cachedModuleResolutionFilter = result;
-        return result;
-    }
-
-    private static Set<ExcludeSpec> collectEdgeConstraint(ExcludeSpec nodeExclusions, Set<ExcludeSpec> excludedByEither, EdgeState dependencyEdge, ExcludeSpec nothing, int incomingEdgeCount) {
-        // Constraint: only consider explicit exclusions declared for this constraint
-        ExcludeSpec constraintExclusions = dependencyEdge.getEdgeExclusions();
-        if (constraintExclusions != nothing && constraintExclusions != nodeExclusions) {
-            if (excludedByEither == null) {
-                excludedByEither = Sets.newHashSetWithExpectedSize(incomingEdgeCount);
-            }
-            excludedByEither.add(constraintExclusions);
-        }
-        return excludedByEither;
-    }
-
-    private ExcludeSpec joinNodeExclusions(ExcludeSpec nodeExclusions, Set<ExcludeSpec> excludedByEither) {
-        if (excludedByEither != null) {
-            if (nodeExclusions != null) {
-                excludedByEither.add(nodeExclusions);
-                nodeExclusions = moduleExclusions.excludeAny(excludedByEither);
-            }
-        }
-        return nodeExclusions;
-    }
-
-    private ExcludeSpec intersectEdgeExclusions(ExcludeSpec edgeExclusions, Set<ExcludeSpec> excludedByBoth) {
-        if (edgeExclusions == moduleExclusions.nothing()) {
-            return edgeExclusions;
-        }
-        if (excludedByBoth != null) {
-            if (edgeExclusions != null) {
-                excludedByBoth.add(edgeExclusions);
-            }
-            edgeExclusions = moduleExclusions.excludeAll(excludedByBoth);
-        }
-        return edgeExclusions;
-    }
-
-    private boolean sameIncomingEdgesAsPreviousPass(int incomingEdgeCount) {
-        // This is a heuristic, more than truth: it is possible that the 2 long hashs
-        // are identical AND that the sizes of collections are identical, but it's
-        // extremely unlikely (never happened on test cases even on large dependency graph)
-        return cachedModuleResolutionFilter != null
-            && previousIncomingHash == incomingHash
-            && previousIncomingEdgeCount == incomingEdgeCount;
     }
 
     private void removeOutgoingEdges() {
@@ -748,7 +615,9 @@ public class NodeState implements DependencyGraphNode {
             }
         }
         virtualEdges = null;
-        previousTraversalExclusions = null;
+        // BEGIN_INDEED GRADLE-432
+        previousMergedOverrideRules = null;
+        // END_INDEED
         virtualPlatformNeedsRefresh = false;
     }
 

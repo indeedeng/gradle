@@ -17,6 +17,7 @@
 package org.gradle.api.internal.artifacts.ivyservice.ivyresolve.parser;
 
 import com.google.common.base.Joiner;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import org.apache.ivy.core.IvyPatternHelper;
 import org.apache.ivy.core.NormalRelativeUrlResolver;
@@ -37,6 +38,7 @@ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
 import org.apache.ivy.core.module.id.ArtifactId;
 import org.apache.ivy.core.module.id.ModuleId;
 import org.apache.ivy.core.module.id.ModuleRevisionId;
+import org.apache.ivy.plugins.matcher.ExactPatternMatcher;
 import org.apache.ivy.plugins.matcher.PatternMatcher;
 import org.apache.ivy.plugins.namespace.Namespace;
 import org.apache.ivy.plugins.parser.xml.XmlModuleDescriptorParser;
@@ -50,9 +52,14 @@ import org.gradle.api.internal.artifacts.DefaultModuleIdentifier;
 import org.gradle.api.internal.artifacts.ImmutableModuleIdentifierFactory;
 import org.gradle.api.internal.artifacts.ivyservice.IvyUtil;
 import org.gradle.api.internal.artifacts.ivyservice.NamespaceId;
+import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.strategy.DefaultVersionComparator;
+import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.strategy.Version;
+import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.strategy.VersionParser;
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.excludes.PatternMatchers;
 import org.gradle.api.internal.artifacts.repositories.metadata.IvyMutableModuleMetadataFactory;
 import org.gradle.api.internal.component.ArtifactType;
+import org.gradle.api.internal.indeed.SingleOverrideRule;
+import org.gradle.api.internal.indeed.OverrideRuleSerializer;
 import org.gradle.api.resources.MissingResourceException;
 import org.gradle.internal.classloader.ClassLoaderUtils;
 import org.gradle.internal.component.external.descriptor.Artifact;
@@ -88,6 +95,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -499,6 +507,7 @@ public class IvyXmlModuleDescriptorParser extends AbstractModuleDescriptorParser
         private String[] publicationsDefaultConf;
         private boolean hasGradleMetadataRedirect;
         final Map<String, String> properties;
+        final List<SingleOverrideRule> indeedHackOverrideRules = Lists.newArrayList();
 
         public Parser(DescriptorParseContext parseContext, IvyModuleDescriptorConverter moduleDescriptorConverter, ExternalResource res, URL descriptorURL, ImmutableModuleIdentifierFactory moduleIdentifierFactory, IvyMutableModuleMetadataFactory metadataFactory, Map<String, String> properties) {
             super(res);
@@ -643,10 +652,26 @@ public class IvyXmlModuleDescriptorParser extends AbstractModuleDescriptorParser
                     confStarted(attributes);
                 } else if ("mapped".equals(qName)) {
                     dd.addDependencyConfiguration(conf, substitute(attributes.getValue("name")));
-                } else if (("conflict".equals(qName) && state == State.DEPS) || "manager".equals(qName) && state == State.CONFLICT) {
-                    LOGGER.debug("Ivy.xml conflict managers are not supported by Gradle. Ignoring conflict manager declared in {}", getResource().getDisplayName());
+                // BEGIN_INDEED GRADLE-432
+                } else if ("manager".equals(qName) && state == State.CONFLICT) {
+                    LOGGER.warn("Ivy.xml conflict managers are not supported by Gradle. Ignoring conflict manager declared in {}", getResource().getDisplayName());
+                } else if ("conflict".equals(qName) && state == State.DEPS && attributes.getValue("manager") != null) {
+                    LOGGER.warn("Ivy.xml conflict managers are not supported by Gradle. Ignoring conflict manager declared in {}", getResource().getDisplayName());
+                } else if (("conflict".equals(qName) && state == State.DEPS)) {
+                    indeedHackOverrideRules.add(new SingleOverrideRule(
+                            attributes.getValue("org"),
+                            attributes.getValue("module"),
+                            getPatternMatcher(attributes.getValue("matcher")).getName(),
+                            attributes.getValue("rev")
+                    ));
                 } else if ("override".equals(qName) && state == State.DEPS) {
-                    LOGGER.debug("Ivy.xml dependency overrides are not supported by Gradle. Ignoring override declared in {}", getResource().getDisplayName());
+                    indeedHackOverrideRules.add(new SingleOverrideRule(
+                            attributes.getValue("org"),
+                            attributes.getValue("module"),
+                            getPatternMatcher(attributes.getValue("matcher")).getName(),
+                            attributes.getValue("rev")
+                    ));
+                // END_INDEED
                 } else if ("include".equals(qName) && state == State.CONF) {
                     includeConfStarted(attributes);
                 } else if (validate && state != State.EXTRA_INFO && state != State.DESCRIPTION) {
@@ -956,6 +981,18 @@ public class IvyXmlModuleDescriptorParser extends AbstractModuleDescriptorParser
             if (confs != null && confs.length() > 0) {
                 parseDepsConfs(confs, dd);
             }
+
+            // BEGIN_INDEED GRADLE-432
+            if (force) {
+                final ModuleId mid = IvyUtil.createModuleId("FORCED_MARKER", "FORCED_MARKER");
+                ArtifactId aid = new ArtifactId(mid, "", "", "");
+                final DefaultExcludeRule forceMarker = new DefaultExcludeRule(aid, ExactPatternMatcher.INSTANCE, null);
+                for (String c : getMd().getConfigurationsNames()) {
+                    forceMarker.addConfiguration(c);
+                    dd.addExcludeRule(c, forceMarker);
+                }
+            }
+            // END_INDEED
         }
 
         private void artifactStarted(String qName, Attributes attributes)
@@ -1134,6 +1171,23 @@ public class IvyXmlModuleDescriptorParser extends AbstractModuleDescriptorParser
                 confAware = new DefaultExcludeRule(aid, matcher, extraAttributes);
             }
             String confs = substitute(attributes.getValue("conf"));
+
+            /* INDEED */
+            /* Quick fix to make the broken location-geocoder v <= 4.1.13 work with gradle */
+            if (getMd().getModuleRevisionId().getOrganisation().equals("indeed")
+                    && getMd().getModuleRevisionId().getName().equals("location-geocoder")
+                    && "compile,default,webapp,tools".equals(confs)) {
+                final VersionParser versionParser = new VersionParser();
+                final Comparator<Version> versionComparator = (new DefaultVersionComparator()).asVersionComparator();
+                if (versionComparator.compare(
+                        versionParser.transform(getMd().getModuleRevisionId().getRevision()),
+                        versionParser.transform("4.1.13")
+                ) <= 0) {
+                    confs = "compile,default,webapp";
+                }
+            }
+            /* /INDEED */
+
             // only add confs if they are specified. if they aren't, endElement will handle this
             // only if there are no conf defined in sub elements
             if (confs != null && confs.length() > 0) {
@@ -1222,6 +1276,9 @@ public class IvyXmlModuleDescriptorParser extends AbstractModuleDescriptorParser
                 }
                 state = State.DEPS;
             } else if ("dependencies".equals(qName) && state == State.DEPS) {
+                // BEGIN_INDEED GRADLE-432
+                OverrideRuleSerializer.serializeToExtraInfo(getMd().getExtraInfo(), indeedHackOverrideRules);
+                // END_INDEED
                 state = State.NONE;
             } else if (state == State.INFO && "info".equals(qName)) {
                 metaData = new IvyModuleResolveMetaDataBuilder(getMd(), moduleDescriptorConverter, metadataFactory);

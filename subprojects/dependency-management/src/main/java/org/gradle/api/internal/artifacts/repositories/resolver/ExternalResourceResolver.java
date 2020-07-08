@@ -86,6 +86,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public abstract class ExternalResourceResolver<T extends ModuleComponentResolveMetadata> implements ModuleVersionPublisher, ConfiguredModuleComponentRepository {
     private static final Logger LOGGER = LoggerFactory.getLogger(ExternalResourceResolver.class);
@@ -506,6 +508,16 @@ public abstract class ExternalResourceResolver<T extends ModuleComponentResolveM
 
     private String generateId(ExternalResourceResolver resolver) {
         Hasher cacheHasher = Hashing.newHasher();
+
+        // BEGIN_INDEED GRADLE-435
+        // Allow busting repo cache based on a special token in the name
+        final Pattern p = Pattern.compile(".*:bust([^:]+):.*");
+        final Matcher m = p.matcher(resolver.name);
+        if (m.matches()) {
+            cacheHasher.putString(m.group(1));
+        }
+        // END_INDEED
+
         cacheHasher.putString(getClass().getName());
         cacheHasher.putInt(resolver.ivyPatterns.size());
         for (ResourcePattern ivyPattern : ivyPatterns) {

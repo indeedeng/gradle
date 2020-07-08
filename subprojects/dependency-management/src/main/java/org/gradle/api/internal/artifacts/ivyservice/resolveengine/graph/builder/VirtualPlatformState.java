@@ -17,6 +17,7 @@ package org.gradle.api.internal.artifacts.ivyservice.resolveengine.graph.builder
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import org.gradle.api.artifacts.ModuleIdentifier;
 import org.gradle.api.artifacts.component.ComponentIdentifier;
 import org.gradle.api.artifacts.component.ComponentSelector;
 import org.gradle.api.artifacts.component.ModuleComponentSelector;
@@ -33,7 +34,12 @@ public class VirtualPlatformState {
     private final ModuleResolveState platformModule;
     private final ResolveOptimizations resolveOptimizations;
 
-    private final Set<ModuleResolveState> participatingModules = Sets.newHashSet();
+    // BEGIN_INDEED GRADLE-284
+    // The order of participating modules affects the order of edge creation, which affects node creation, which affects
+    // the order of the classpath, which is used to determine if compilation is up-to-date.
+    // Something causes ModuleResolveStates to be inserted into this set in a non-deterministic order between builds.
+    private final Set<ModuleResolveState> participatingModules = Sets.newTreeSet(MODULE_RESOLVE_STATE_COMPARATOR);
+    // END_INDEED
     private final List<EdgeState> orphanEdges = Lists.newArrayListWithExpectedSize(2);
 
     private boolean hasForcedParticipatingModule;
@@ -156,4 +162,22 @@ public class VirtualPlatformState {
         }
         return vC.compare(forcedVersion, version) > 0;
     }
+
+    // BEGIN_INDEED GRADLE-284
+    private static final Comparator<ModuleResolveState> MODULE_RESOLVE_STATE_COMPARATOR =
+        (final ModuleResolveState o1, final ModuleResolveState o2) -> {
+            final ModuleIdentifier id1 = o1.getId();
+            final ModuleIdentifier id2 = o2.getId();
+            if (id1 == id2) {
+                return 0;
+            }
+
+            final int groupComparison = id1.getGroup().compareTo(id2.getGroup());
+            if (groupComparison != 0) {
+                return groupComparison;
+            }
+
+            return id1.getName().compareTo(id2.getName());
+        };
+    // END_INDEED
 }

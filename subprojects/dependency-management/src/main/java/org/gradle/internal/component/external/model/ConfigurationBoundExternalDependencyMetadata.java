@@ -17,6 +17,7 @@ package org.gradle.internal.component.external.model;
 
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableList;
+import org.gradle.api.artifacts.Dependency;
 import org.gradle.api.artifacts.VersionConstraint;
 import org.gradle.api.artifacts.component.ComponentSelector;
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier;
@@ -25,6 +26,8 @@ import org.gradle.api.artifacts.component.ProjectComponentSelector;
 import org.gradle.api.capabilities.Capability;
 import org.gradle.api.internal.attributes.AttributesSchemaInternal;
 import org.gradle.api.internal.attributes.ImmutableAttributes;
+import org.gradle.api.internal.indeed.IndeedConfigurationRedirector;
+import org.gradle.internal.component.external.model.maven.MavenDependencyDescriptor;
 import org.gradle.internal.component.local.model.DefaultProjectDependencyMetadata;
 import org.gradle.internal.component.model.AttributeConfigurationSelector;
 import org.gradle.internal.component.model.ComponentResolveMetadata;
@@ -88,6 +91,18 @@ public class ConfigurationBoundExternalDependencyMetadata implements ModuleDepen
     public List<ConfigurationMetadata> selectConfigurations(ImmutableAttributes consumerAttributes, ComponentResolveMetadata targetComponent, AttributesSchemaInternal consumerSchema, Collection<? extends Capability> explicitRequestedCapabilities) {
         // This is a slight different condition than that used for a dependency declared in a Gradle project,
         // which is (targetHasVariants || consumerHasAttributes), relying on the fallback to 'default' for consumer attributes without any variants.
+        if (dependencyDescriptor instanceof MavenDependencyDescriptor) {
+            // BEGIN_INDEED GRADLE-445
+            final ConfigurationMetadata redirect = IndeedConfigurationRedirector.shouldRedirect(
+                    IndeedConfigurationRedirector.FROM_TYPE.MAVEN,
+                    targetComponent,
+                    Dependency.DEFAULT_CONFIGURATION
+            );
+            if (redirect != null) {
+                return ImmutableList.of(redirect);
+            }
+            // END_INDEED
+        }
         if (alwaysUseAttributeMatching || hasVariants(targetComponent)) {
             return ImmutableList.of(AttributeConfigurationSelector.selectConfigurationUsingAttributeMatching(consumerAttributes, explicitRequestedCapabilities, targetComponent, consumerSchema, getArtifacts()));
         }

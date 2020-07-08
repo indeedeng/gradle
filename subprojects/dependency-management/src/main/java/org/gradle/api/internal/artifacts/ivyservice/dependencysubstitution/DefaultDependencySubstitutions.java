@@ -277,6 +277,16 @@ public class DefaultDependencySubstitutions implements DependencySubstitutionsIn
 
         @Override
         public void execute(DependencySubstitution substitution) {
+            // BEGIN_INDEED GRADLE-137
+
+            // INDEED -- Only ask project if they would like to rewrite a module if it is an external module dependency.
+            // Project dependencies should never be rewritten, and this API doesn't allow the project to know if a
+            // dependency is a project or not.
+            if (!(substitution.getRequested() instanceof ModuleComponentSelector)) {
+                return;
+            }
+            // END_INDEED
+
             ModuleVersionSelector requested = componentSelectorConverter.getSelector(substitution.getRequested());
             DefaultDependencyResolveDetails details = new DefaultDependencyResolveDetails((DependencySubstitutionInternal) substitution, requested);
             delegate.execute(details);

@@ -25,6 +25,7 @@ import com.google.common.collect.Multimap;
 import com.google.common.collect.SetMultimap;
 import org.gradle.api.artifacts.component.ComponentIdentifier;
 import org.gradle.api.artifacts.component.ModuleComponentSelector;
+import org.gradle.api.internal.indeed.IndeedConfigurationRedirector;
 import org.gradle.internal.component.external.descriptor.Artifact;
 import org.gradle.internal.component.external.model.ExternalDependencyDescriptor;
 import org.gradle.internal.component.model.ComponentResolveMetadata;
@@ -168,15 +169,39 @@ public class IvyDependencyDescriptor extends ExternalDependencyDescriptor {
         int startFallback = targetPattern.indexOf('(');
         if (startFallback >= 0) {
             if (targetPattern.endsWith(")")) {
+                // BEGIN_INDEED GRADLE-445
+                /* INDEED - Minor cleanup so this fallback case runs through the shouldRedirect below */
                 String preferred = targetPattern.substring(0, startFallback);
-                ConfigurationMetadata configuration = targetComponent.getConfiguration(preferred);
-                if (configuration != null) {
-                    maybeAddConfiguration(targetConfigurations, configuration);
-                    return;
+                String fallback = targetPattern.substring(startFallback + 1, targetPattern.length() - 1);
+                try {
+                    findMatches(fromComponent, targetComponent, fromConfiguration, patternConfiguration, preferred, targetConfigurations);
+                } catch(ConfigurationNotFoundException e) { /* */ }
+                if (targetConfigurations.isEmpty()) {
+                    findMatches(fromComponent, targetComponent, fromConfiguration, patternConfiguration, fallback, targetConfigurations);
                 }
-                targetPattern = targetPattern.substring(startFallback + 1, targetPattern.length() - 1);
+                return;
+                // END_INDEED
             }
         }
+
+        // BEGIN_INDEED GRADLE-432
+        // Support empty fallback conf="sources->sources()"
+        if (targetPattern.isEmpty()) {
+            return;
+        }
+        // END_INDEED
+
+        // BEGIN_INDEED GRADLE-445
+        final ConfigurationMetadata redirect = IndeedConfigurationRedirector.shouldRedirect(
+                IndeedConfigurationRedirector.FROM_TYPE.IVY,
+                targetComponent,
+                targetPattern
+        );
+        if (redirect != null) {
+            maybeAddConfiguration(targetConfigurations, redirect);
+            return;
+        }
+        // END_INDEED
 
         if (targetPattern.equals("*")) {
             for (String targetName : targetComponent.getConfigurationNames()) {

@@ -16,6 +16,7 @@
 
 package org.gradle.api.internal.artifacts.ivyservice.resolveengine.graph.builder;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import org.gradle.api.artifacts.Dependency;
 import org.gradle.api.artifacts.ModuleIdentifier;
@@ -28,6 +29,10 @@ import org.gradle.api.internal.artifacts.ivyservice.resolveengine.excludes.specs
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.graph.DependencyGraphEdge;
 import org.gradle.api.internal.attributes.AttributeMergingException;
 import org.gradle.api.internal.attributes.ImmutableAttributes;
+import org.gradle.api.internal.indeed.IndeedRuleRewriter;
+import org.gradle.api.internal.indeed.MergedOverrideRules;
+import org.gradle.api.internal.indeed.OverrideRuleSerializer;
+import org.gradle.api.internal.indeed.SingleOverrideRule;
 import org.gradle.internal.component.local.model.DslOriginDependencyMetadata;
 import org.gradle.internal.component.model.ComponentArtifactMetadata;
 import org.gradle.internal.component.model.ComponentResolveMetadata;
@@ -66,16 +71,42 @@ class EdgeState implements DependencyGraphEdge {
     private ExcludeSpec cachedEdgeExclusions;
     private ExcludeSpec cachedExclusions;
 
+    // BEGIN_INDEED GRADLE-432
+    private final MergedOverrideRules mergedOverrideRules;
+    // END_INDEED
+
     private ResolvedVariantResult resolvedVariant;
 
-    EdgeState(NodeState from, DependencyState dependencyState, ExcludeSpec transitiveExclusions, ResolveState resolveState) {
+    // BEGIN_INDEED GRADLE-432
+    EdgeState(NodeState from, DependencyState dependencyState, MergedOverrideRules nodeMergedOverrideRules, ResolveState resolveState) {
+    // END_INDEED
         this.from = from;
         this.dependencyState = dependencyState;
         this.dependencyMetadata = dependencyState.getDependency();
         // The accumulated exclusions that apply to this edge based on the path from the root
-        this.transitiveExclusions = transitiveExclusions;
+        // BEGIN_INDEED GRADLE-436
+        this.transitiveExclusions = resolveState.getModuleExclusions().nothing();
+        // END_INDEED
         this.resolveState = resolveState;
         this.selector = resolveState.getSelector(dependencyState);
+
+        // BEGIN_INDEED GRADLE-432
+        // Parse edge override rules
+        final List<SingleOverrideRule> edgeOverrideRules = IndeedRuleRewriter.rewriteOverrides(
+                resolveState.getDependencySubstitutionApplicator(),
+                OverrideRuleSerializer.parseFromEdge(dependencyMetadata, from.getComponent().getId())
+        );
+        // Create the combined merged override rules for this edge
+        // note: nodeMergedOverrideRules may be null if this is coming from a PotentialEdge generated
+        // on a node that has transitive = false (and thus goes through handleNonTransitiveNode and doesn't
+        // get previousMergedOverrideRules set)
+        this.mergedOverrideRules = MergedOverrideRules.create(
+                nodeMergedOverrideRules != null ? ImmutableList.of(nodeMergedOverrideRules) : ImmutableList.of(),
+                edgeOverrideRules,
+                this
+        );
+        // END_INDEED
+
         this.isTransitive = from.isTransitive() && dependencyMetadata.isTransitive();
         this.isConstraint = dependencyMetadata.isConstraint();
         this.hashCode = computeHashCode();
@@ -266,40 +297,12 @@ class EdgeState implements DependencyGraphEdge {
         return selector.getDependencyMetadata() instanceof LenientPlatformDependencyMetadata;
     }
 
+    // BEGIN_INDEED GRADLE-436
     @Override
     public ExcludeSpec getExclusions() {
-        if (cachedExclusions == null) {
-            computeExclusions();
-        }
-        return cachedExclusions;
+        return resolveState.getModuleExclusions().nothing();
     }
-
-    private void computeExclusions() {
-        List<ExcludeMetadata> excludes = dependencyMetadata.getExcludes();
-        if (excludes.isEmpty()) {
-            cachedExclusions = transitiveExclusions;
-        } else {
-            computeExclusionsWhenExcludesPresent(excludes);
-        }
-    }
-
-    private void computeExclusionsWhenExcludesPresent(List<ExcludeMetadata> excludes) {
-        ModuleExclusions moduleExclusions = resolveState.getModuleExclusions();
-        ExcludeSpec edgeExclusions = moduleExclusions.excludeAny(excludes);
-        cachedExclusions = moduleExclusions.excludeAny(edgeExclusions, transitiveExclusions);
-    }
-
-    ExcludeSpec getEdgeExclusions() {
-        if (cachedEdgeExclusions == null) {
-            List<ExcludeMetadata> excludes = dependencyMetadata.getExcludes();
-            ModuleExclusions moduleExclusions = resolveState.getModuleExclusions();
-            if (excludes.isEmpty()) {
-                return moduleExclusions.nothing();
-            }
-            cachedEdgeExclusions = moduleExclusions.excludeAny(excludes);
-        }
-        return cachedEdgeExclusions;
-    }
+    // END_INDEED
 
     @Override
     public boolean contributesArtifacts() {
@@ -322,6 +325,12 @@ class EdgeState implements DependencyGraphEdge {
         }
         return getSelectedComponent().getMetadataResolveFailure();
     }
+
+    // BEGIN_INDEED GRADLE-432
+    public MergedOverrideRules getMergedOverrideRules() {
+        return mergedOverrideRules;
+    }
+    // END_INDEED
 
     @Override
     public Long getSelected() {

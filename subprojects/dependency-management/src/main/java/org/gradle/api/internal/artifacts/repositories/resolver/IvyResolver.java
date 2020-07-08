@@ -15,6 +15,7 @@
  */
 package org.gradle.api.internal.artifacts.repositories.resolver;
 
+import com.google.common.collect.ImmutableSet;
 import org.gradle.api.artifacts.ComponentMetadataListerDetails;
 import org.gradle.api.artifacts.ComponentMetadataSupplierDetails;
 import org.gradle.api.internal.artifacts.ImmutableModuleIdentifierFactory;
@@ -24,20 +25,26 @@ import org.gradle.api.internal.artifacts.repositories.metadata.MetadataArtifactP
 import org.gradle.api.internal.artifacts.repositories.transport.RepositoryTransport;
 import org.gradle.api.internal.component.ArtifactType;
 import org.gradle.internal.action.InstantiatingAction;
+import org.gradle.internal.component.external.model.DefaultModuleComponentArtifactMetadata;
 import org.gradle.internal.component.external.model.MetadataSourcedComponentArtifacts;
 import org.gradle.internal.component.external.model.ModuleComponentArtifactIdentifier;
 import org.gradle.internal.component.external.model.ModuleComponentArtifactMetadata;
 import org.gradle.internal.component.external.model.ivy.IvyModuleResolveMetadata;
 import org.gradle.internal.component.model.ConfigurationMetadata;
+import org.gradle.internal.component.model.DefaultIvyArtifactName;
+import org.gradle.internal.component.model.IvyArtifactName;
 import org.gradle.internal.hash.Hasher;
 import org.gradle.internal.reflect.Instantiator;
 import org.gradle.internal.resolve.result.BuildableArtifactSetResolveResult;
 import org.gradle.internal.resolve.result.BuildableComponentArtifactsResolveResult;
+import org.gradle.internal.resolve.result.DefaultResourceAwareResolveResult;
 import org.gradle.internal.resource.local.FileStore;
 import org.gradle.internal.resource.local.LocallyAvailableResourceFinder;
 
 import javax.annotation.Nullable;
 import java.net.URI;
+import java.util.Collections;
+import java.util.Set;
 
 public class IvyResolver extends ExternalResourceResolver<IvyModuleResolveMetadata> implements PatternBasedResolver {
 
@@ -138,17 +145,16 @@ public class IvyResolver extends ExternalResourceResolver<IvyModuleResolveMetada
 
         @Override
         protected void resolveSourceArtifacts(IvyModuleResolveMetadata module, BuildableArtifactSetResolveResult result) {
-            ConfigurationMetadata configuration = module.getConfiguration("sources");
-            if (configuration != null) {
-                result.resolved(configuration.getArtifacts());
-            }
+            /* INDEED -- do nothing here, always delegate to remote access below */
         }
     }
 
     private class IvyRemoteRepositoryAccess extends RemoteRepositoryAccess {
         @Override
         protected void resolveModuleArtifacts(IvyModuleResolveMetadata module, BuildableComponentArtifactsResolveResult result) {
+            // BEGIN_INDEED GRADLE-446
             // Configuration artifacts are determined locally
+            // END_INDEED
         }
 
         @Override
@@ -160,7 +166,18 @@ public class IvyResolver extends ExternalResourceResolver<IvyModuleResolveMetada
         @Override
         protected void resolveSourceArtifacts(IvyModuleResolveMetadata module, BuildableArtifactSetResolveResult result) {
             // Probe for artifact with classifier
-            result.resolved(findOptionalArtifacts(module, "source", "sources"));
+            // BEGIN_INDEED GRADLE-446
+            /* INDEED -- search for our custom ivy sources naming scheme, rather than the one gradle expects */
+            final IvyArtifactName ivyArtifactName = new DefaultIvyArtifactName(module.getModuleVersionId().getName() + "-src", "source", "zip", null);
+            final ModuleComponentArtifactMetadata artifact = new DefaultModuleComponentArtifactMetadata(module.getId(), ivyArtifactName);
+            final Set<ModuleComponentArtifactMetadata> artifacts;
+            if (createArtifactResolver(module.getSource()).artifactExists(artifact, new DefaultResourceAwareResolveResult())) {
+                artifacts = ImmutableSet.of(artifact);
+            } else {
+                artifacts = Collections.emptySet();
+            }
+            result.resolved(artifacts);
+            // END_INDEED
         }
     }
 }

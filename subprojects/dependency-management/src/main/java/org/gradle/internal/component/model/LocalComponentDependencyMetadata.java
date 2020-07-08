@@ -27,6 +27,7 @@ import org.gradle.api.capabilities.Capability;
 import org.gradle.api.internal.attributes.AttributeContainerInternal;
 import org.gradle.api.internal.attributes.AttributesSchemaInternal;
 import org.gradle.api.internal.attributes.ImmutableAttributes;
+import org.gradle.api.internal.indeed.IndeedConfigurationRedirector;
 import org.gradle.internal.component.IncompatibleConfigurationSelectionException;
 import org.gradle.internal.exceptions.ConfigurationNotConsumableException;
 import org.gradle.util.GUtil;
@@ -133,6 +134,21 @@ public class LocalComponentDependencyMetadata implements LocalOriginDependencyMe
      */
     @Override
     public List<ConfigurationMetadata> selectConfigurations(ImmutableAttributes consumerAttributes, ComponentResolveMetadata targetComponent, AttributesSchemaInternal consumerSchema, Collection<? extends Capability> explicitRequestedCapabilities) {
+
+        // BEGIN_INDEED GRADLE-445
+        {
+            String targetConfiguration = GUtil.elvis(dependencyConfiguration, Dependency.DEFAULT_CONFIGURATION);
+            final ConfigurationMetadata redirect = IndeedConfigurationRedirector.shouldRedirect(
+                    IndeedConfigurationRedirector.FROM_TYPE.GRADLE,
+                    targetComponent,
+                    targetConfiguration
+            );
+            if (redirect != null) {
+                return ImmutableList.of(redirect);
+            }
+        }
+        // END_INDEED
+
         boolean consumerHasAttributes = !consumerAttributes.isEmpty();
         Optional<ImmutableList<? extends ConfigurationMetadata>> targetVariants = targetComponent.getVariantsForGraphTraversal();
         boolean useConfigurationAttributes = dependencyConfiguration == null && (consumerHasAttributes || targetVariants.isPresent());
